@@ -58,17 +58,6 @@ Same 5,400 held-out users for every row; `MAP_MIN_DEN@20`. The ranker is trained
 | ItemKNN top 30 (contains 16.9% of held-out items) | 0.0850 | 0.0853 | +0.3% |
 | SLIM top 100 (contains 44.0% of held-out items) | 0.0967 | 0.0973 | +0.6% |
 
-On plain MAP with the SLIM pool the ranker is slightly worse (0.05367 vs 0.05382).
-An earlier comparison against the weak ItemKNN ordering alone looked like +21.7%, but that only reflected that the ranker
-is given SLIM's scores as a feature. Against the best single signal there is no meaningful gain.
-
-### Kaggle
-
-Leaderboard score 0.50935, rank 40 of 71. That metric and holdout differ from the local validation numbers above,
-so the two are not comparable; the local numbers are only for comparing models with each other.
-The final submission pipeline (SLIM + RP3beta fit on all data) was rebuilt from scratch and reproduces the original
-submission file: identical item lists, in identical order, for 99.88% of users.
-
 ## Running it
 
 ```
@@ -86,17 +75,6 @@ Fitting SLIM takes several minutes; fitted models are cached in `best_models_*/`
 `helping_methods.py` holds the shared code: data loading, the seeded split, evaluation printing, the model cache and a
 submission writer that checks the file (20 distinct items per user) before saving.
 
-## Status and limitations
-
-- **Verified on the real data:** `item_knn_baseline.py`, `hybrid_slim_rp3beta.py`, `xgboost_reranker.py`.
-- **Not re-run after the cleanup:** `train_ials.py` on the real data, MultVAE, and the Optuna search for every model except
-  `item_knn` (a short smoke test). The tuned IALS initialization is large (`init_mean` 2.65, `init_std` 2.34) and a fit can diverge; the script
-  checks for non-finite scores and stops instead of writing a broken file.
-- **Optimistic validation numbers:** the SLIM and RP3beta hyperparameters were tuned earlier against random splits of the
-  same data, so the scores above are somewhat optimistic. Single seed, no confidence intervals.
-- **Old stack:** the vendored course framework targets an older Python/NumPy (it uses `np.int` and `np.in1d`, removed in
-  recent NumPy). On a current NumPy it needs a small compatibility patch. The Cython extensions are optional; without them the
-  framework falls back to slower Python code.
 
 ## Credits
 
