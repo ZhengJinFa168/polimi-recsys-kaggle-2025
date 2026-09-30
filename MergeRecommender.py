@@ -1,179 +1,114 @@
-from Recommenders.Recommender_utils import check_matrix, similarityMatrixTopK
-from Recommenders.BaseSimilarityMatrixRecommender import BaseItemSimilarityMatrixRecommender
 import numpy as np
 
-class DifferentLossRecommender(BaseItemSimilarityMatrixRecommender):
-    RECOMMENDER_NAME = "ItemKNNSimilarityHybridRecommender"
+from Recommenders.BaseRecommender import BaseRecommender
 
-    def __init__(self, URM_train, Recommenders, verbose=True, normalization_method="minmax"):
+
+class ScoreBlendRecommender(BaseRecommender):
+    """Weighted blend of the (normalized) scores of already-fitted recommenders.
+
+    Fixes compared with the old DifferentLossRecommender:
+      * normalization statistics ignore items the user already has (they are removed from the
+        ranking anyway, and often carry the extreme scores that distorted min/max);
+      * the user sample is seeded (results were different at every run);
+      * scores are computed in one batch per recommender instead of one user at a time, and
+        sum / l2 no longer recompute all the scores a second time;
+      * a coefficient of 0 no longer produces NaN (0 * -inf) when items_to_compute is used;
+      * no need to inherit from the item-similarity base class (there is no W_sparse here).
+    """
+
+    RECOMMENDER_NAME = "ScoreBlendRecommender"
+
+    def __init__(self, URM_train, Recommenders, verbose=True, normalization_method="minmax",
+                 n_users_sample=500, seed=1234):
         """
-        Args:
-            URM_train: User-Rating Matrix
-            Recommenders: List of recommender objects
-            verbose: Verbosity flag
-            normalization_method: Method for normalization:
-                - "minmax": Scale each recommender's scores to [0, 1]
-                - "zscore": Standardize to mean=0, std=1
-                - "max": Divide by maximum value
-                - "sum": Divide by sum of all scores
-                - "l2": L2 normalization (divide by Euclidean norm)
-                - None: No normalization
+        normalization_method: "minmax" | "zscore" | "max" | "sum" | "l2" | None
+        The recommenders must already be fitted (statistics are computed here).
         """
-        super(DifferentLossRecommender, self).__init__(URM_train, verbose=verbose)
+        super(ScoreBlendRecommender, self).__init__(URM_train, verbose=verbose)
         self.recommenders = Recommenders
         self.normalization_method = normalization_method
-        self.normalization_stats = {}  # Store normalization parameters for each recommender
-        # Compute normalization statistics for each recommender
-        if self.normalization_method is not None:
+        self.n_users_sample = n_users_sample
+        self.seed = seed
+        self.coefficients = None
+        self.normalization_stats = {}
+
+        if normalization_method not in (None, "minmax", "zscore", "max", "sum", "l2"):
+            raise ValueError("Unknown normalization method: {}".format(normalization_method))
+        if normalization_method is not None:
             self._compute_normalization_stats()
 
     def fit(self, coefficients):
-        """
-        Fit the hybrid recommender.
-        
-        Args:
-            coefficients: List of weights for each recommender
-            fit_recommenders: If True, fit all base recommenders first
-        """
-        # Validate coefficients length matches number of recommenders
         if len(coefficients) != len(self.recommenders):
-            raise ValueError(f"Number of coefficients ({len(coefficients)}) doesn't match number of recommenders ({len(self.recommenders)})")
-        
-        self.coefficients = coefficients
+            raise ValueError("Number of coefficients ({}) doesn't match number of recommenders ({})".format(
+                len(coefficients), len(self.recommenders)))
+        self.coefficients = list(coefficients)
 
-            
     def _compute_normalization_stats(self):
-        """Compute normalization statistics for all recommenders."""
-        if self.verbose:
-            print(f"Computing normalization statistics using {self.normalization_method} method...")
-        
+        self._print("Computing normalization statistics ({})...".format(self.normalization_method))
+        rng = np.random.default_rng(self.seed)
+        users = rng.choice(self.n_users, min(self.n_users_sample, self.n_users), replace=False)
+        seen = self.URM_train[users].toarray() > 0
+
         for i, recommender in enumerate(self.recommenders):
-            # Compute scores for all users to get statistics
-            all_scores = []
-            
-            # Sample users to compute statistics (for efficiency)
-            n_users_sample = min(1000, self.URM_train.shape[0])
-            user_sample = np.random.choice(self.URM_train.shape[0], n_users_sample, replace=False)
-            
-            for user_id in user_sample:
-                scores = recommender._compute_item_score([user_id])
-                all_scores.extend(scores.flatten())
-            
-            all_scores = np.array(all_scores)
-            
-            # Remove zeros to avoid division issues
-            non_zero_scores = all_scores[all_scores != 0]
-            
-            if len(non_zero_scores) == 0:
-                # Fallback to no normalization if all scores are zero
-                self.normalization_stats[i] = {"method": None, "min": 0, "max": 1, "mean": 0, "std": 1}
+            scores = np.asarray(recommender._compute_item_score(users), dtype=np.float64)
+            scores[~np.isfinite(scores)] = 0.0
+            candidate_scores = scores[~seen]                  # what the ranking actually looks at
+            non_zero = candidate_scores[candidate_scores != 0]
+
+            if len(non_zero) == 0:
+                self.normalization_stats[i] = {"method": None}
                 continue
-                
-            if self.normalization_method == "minmax":
-                min_val = np.min(non_zero_scores)
-                max_val = np.max(non_zero_scores)
-                self.normalization_stats[i] = {"method": "minmax", "min": min_val, "max": max_val}
-                
-            elif self.normalization_method == "zscore":
-                mean_val = np.mean(non_zero_scores)
-                std_val = np.std(non_zero_scores)
-                self.normalization_stats[i] = {"method": "zscore", "mean": mean_val, "std": std_val}
-                
-            elif self.normalization_method == "max":
-                max_val = np.max(non_zero_scores)
-                self.normalization_stats[i] = {"method": "max", "max": max_val}
-                
-            elif self.normalization_method == "sum":
-                # Compute average sum per user
-                sum_vals = []
-                for user_id in user_sample:
-                    scores = recommender._compute_item_score([user_id])
-                    sum_vals.append(np.sum(scores))
-                avg_sum = np.mean(sum_vals)
-                self.normalization_stats[i] = {"method": "sum", "avg_sum": avg_sum}
-                
-            elif self.normalization_method == "l2":
-                # Compute average L2 norm per user
-                norm_vals = []
-                for user_id in user_sample:
-                    scores = recommender._compute_item_score([user_id])
-                    norm_vals.append(np.linalg.norm(scores))
-                avg_norm = np.mean(norm_vals)
-                self.normalization_stats[i] = {"method": "l2", "avg_norm": avg_norm}
-                
-            else:
-                raise ValueError(f"Unknown normalization method: {self.normalization_method}")
-    
-    def _normalize_scores(self, scores, recommender_idx):
-        """Normalize scores based on pre-computed statistics."""
-        if self.normalization_method is None or recommender_idx not in self.normalization_stats:
-            return scores
-            
-        stats = self.normalization_stats[recommender_idx]
-        
-        if stats["method"] is None:
-            return scores
-            
-        if stats["method"] == "minmax":
-            min_val = stats["min"]
-            max_val = stats["max"]
-            if max_val > min_val:
-                return (scores - min_val) / (max_val - min_val)
-            else:
-                return scores
-                
-        elif stats["method"] == "zscore":
-            mean_val = stats["mean"]
-            std_val = stats["std"]
-            if std_val > 0:
-                return (scores - mean_val) / std_val
-            else:
-                return scores - mean_val
-                
-        elif stats["method"] == "max":
-            max_val = stats["max"]
-            if max_val > 0:
-                return scores / max_val
-            else:
-                return scores
-                
-        elif stats["method"] == "sum":
-            avg_sum = stats["avg_sum"]
-            if avg_sum > 0:
-                return scores / avg_sum
-            else:
-                return scores
-                
-        elif stats["method"] == "l2":
-            avg_norm = stats["avg_norm"]
-            if avg_norm > 0:
-                return scores / avg_norm
-            else:
-                return scores
-                
+
+            method = self.normalization_method
+            if method == "minmax":
+                stats = {"min": non_zero.min(), "max": non_zero.max()}
+            elif method == "zscore":
+                stats = {"mean": non_zero.mean(), "std": non_zero.std()}
+            elif method == "max":
+                stats = {"max": non_zero.max()}
+            elif method == "sum":
+                stats = {"avg_sum": np.where(seen, 0.0, scores).sum(axis=1).mean()}
+            else:  # l2
+                stats = {"avg_norm": np.linalg.norm(np.where(seen, 0.0, scores), axis=1).mean()}
+            stats["method"] = method
+            self.normalization_stats[i] = stats
+
+    def _normalize_scores(self, scores, i):
+        stats = self.normalization_stats.get(i, {"method": None})
+        method = stats["method"]
+
+        if method == "minmax":
+            value_range = stats["max"] - stats["min"]
+            return (scores - stats["min"]) / value_range if value_range > 0 else scores
+        if method == "zscore":
+            return (scores - stats["mean"]) / stats["std"] if stats["std"] > 0 else scores - stats["mean"]
+        if method == "max":
+            return scores / stats["max"] if stats["max"] > 0 else scores
+        if method == "sum":
+            return scores / stats["avg_sum"] if stats["avg_sum"] > 0 else scores
+        if method == "l2":
+            return scores / stats["avg_norm"] if stats["avg_norm"] > 0 else scores
         return scores
-    
+
     def _compute_item_score(self, user_id_array, items_to_compute=None):
-        """Compute weighted combination of item scores from all recommenders."""
-        # Initialize with zeros
-        item_weights = np.zeros((len(user_id_array), self.n_items))
-        
-        for i, recommender in enumerate(self.recommenders):
-            # Get raw scores from recommender
-            recommender_scores = recommender._compute_item_score(user_id_array, items_to_compute)
-            
-            # Apply normalization if enabled
-            if self.normalization_method is not None:
-                recommender_scores = self._normalize_scores(recommender_scores, i)
-            
-            # Apply coefficient and add to combined scores
-            weighted_scores = recommender_scores * self.coefficients[i]
-            item_weights += weighted_scores
-            
-            if self.verbose and np.isnan(weighted_scores).any():
-                print(f"Warning: NaN values in recommender {i} after weighting")
-        
-        # Apply final softmax if desired (optional)
-        # item_weights = softmax(item_weights, axis=1)
-        
-        return item_weights
+        if self.coefficients is None:
+            raise RuntimeError("Call fit(coefficients) before recommending")
+        user_id_array = np.atleast_1d(user_id_array)
+        blended = np.zeros((len(user_id_array), self.n_items), dtype=np.float32)
+
+        for i, (recommender, weight) in enumerate(zip(self.recommenders, self.coefficients)):
+            if weight == 0:
+                continue
+            scores = np.asarray(recommender._compute_item_score(user_id_array, items_to_compute))
+            scores = np.where(np.isfinite(scores), scores, 0.0)   # -inf masks are re-applied below
+            blended += weight * self._normalize_scores(scores, i)
+
+        if items_to_compute is not None:
+            not_computed = np.ones(self.n_items, dtype=bool)
+            not_computed[items_to_compute] = False
+            blended[:, not_computed] = -np.inf
+        return blended
+
+
+# Backwards compatible name used by the old scripts
+DifferentLossRecommender = ScoreBlendRecommender

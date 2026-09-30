@@ -1,3 +1,6 @@
 .DS_Store
 .venv/
 
+
+# trained models: large, reproducible with the scripts
+best_models_*/
