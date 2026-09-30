@@ -1,7 +1,6 @@
 # polimi-recsys-kaggle-2025
 
 Top-20 item recommendation for the **Recommender Systems course challenge at Politecnico di Milano (Kaggle, 2025)**.
-This is a university course competition, **not** the ACM RecSys Challenge 2025.
 
 ## Task and data
 
@@ -14,7 +13,7 @@ Implicit-feedback recommendation: for each of 27,095 users, recommend 20 items t
 | Items per user | min 14, median 71 |
 | Available signal | user-item interactions only (no content features, no timestamps) |
 
-The data is not included. Put the competition files in `data/` as `data_train.csv` and `data_target_users_test.csv`.
+The data is not included.
 
 ## What is implemented
 
@@ -57,20 +56,6 @@ Same 5,400 held-out users for every row; `MAP_MIN_DEN@20`. The ranker is trained
 |---|---|---|---|
 | ItemKNN top 30 (contains 16.9% of held-out items) | 0.0850 | 0.0853 | +0.3% |
 | SLIM top 100 (contains 44.0% of held-out items) | 0.0967 | 0.0973 | +0.6% |
-
-## Running it
-
-```
-python item_knn_baseline.py    [--submit]
-python hybrid_slim_rp3beta.py  [--submit]
-python xgboost_reranker.py     [--generator slim --candidates 100] [--submit]
-python train_ials.py           [--submit]
-python tune_optuna.py --model {scaled_puresvd,item_knn,rp3beta,slim,ease_r,ials,multvae} --trials 50
-```
-
-Without `--submit` a script only prints validation scores. With it, the model is refit on all data and a CSV is written.
-Fitting SLIM takes several minutes; fitted models are cached in `best_models_*/`, keyed by a hash of the hyperparameters.
-`multvae` needs PyTorch and is only practical on a GPU.
 
 `helping_methods.py` holds the shared code: data loading, the seeded split, evaluation printing, the model cache and a
 submission writer that checks the file (20 distinct items per user) before saving.
